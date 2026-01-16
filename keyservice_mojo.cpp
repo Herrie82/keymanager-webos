@@ -3,29 +3,29 @@
  * Full Mojo Framework Integration for webOS 3.0.5
  *
  * Uses MojLunaService + MojGmainReactor with SQLite key storage
+ * API compatible with original webOS 3.0.5 keymanager
  */
 
 #include "keyservice_mojo.h"
 #include "keymanager_types.h"
-#include "ckeymanager.cpp"  // Include for CKeyManager
-
-#include "core/MojLogDb8.h"
+#include "keymanager_constants.h"
 
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/buffer.h>
 
 // Service name
 const MojChar* const KeyServiceMojoApp::ServiceName = _T("com.palm.keymanager");
-
-// Logging
-static MojLogger s_log(_T("keymanager"));
 
 /*
  * Base64 encode/decode helpers
  */
 static MojErr base64Encode(const unsigned char* data, int len, MojString& out)
 {
-    // Use OpenSSL BIO for base64 encoding
     BIO* b64 = BIO_new(BIO_f_base64());
     BIO* mem = BIO_new(BIO_s_mem());
     b64 = BIO_push(b64, mem);
@@ -45,7 +45,7 @@ static MojErr base64Encode(const unsigned char* data, int len, MojString& out)
 static int base64Decode(const MojChar* input, unsigned char* output, int maxLen)
 {
     BIO* b64 = BIO_new(BIO_f_base64());
-    BIO* mem = BIO_new_mem_buf(input, -1);
+    BIO* mem = BIO_new_mem_buf((void*)input, -1);
     b64 = BIO_push(b64, mem);
     BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
 
@@ -74,7 +74,7 @@ MojErr KeyServiceMojoHandler::init()
 {
     MojErr err;
 
-    // Register private methods
+    // Register methods (schema=NULL, flags=0 for all)
     err = addMethod(_T("generate"), (Callback)&KeyServiceMojoHandler::handleGenerate);
     MojErrCheck(err);
     err = addMethod(_T("store"), (Callback)&KeyServiceMojoHandler::handleStore);
@@ -95,9 +95,9 @@ MojErr KeyServiceMojoHandler::init()
     MojErrCheck(err);
     err = addMethod(_T("import"), (Callback)&KeyServiceMojoHandler::handleImport);
     MojErrCheck(err);
-    err = addMethod(_T("hash"), (Callback)&KeyServiceMojoHandler::handleHash, true);  // public
+    err = addMethod(_T("hash"), (Callback)&KeyServiceMojoHandler::handleHash);
     MojErrCheck(err);
-    err = addMethod(_T("hmac"), (Callback)&KeyServiceMojoHandler::handleHmac, true);  // public
+    err = addMethod(_T("hmac"), (Callback)&KeyServiceMojoHandler::handleHmac);
     MojErrCheck(err);
     err = addMethod(_T("rsaEncrypt"), (Callback)&KeyServiceMojoHandler::handleRsaEncrypt);
     MojErrCheck(err);
@@ -121,7 +121,6 @@ bool KeyServiceMojoHandler::hasBadChars(const MojChar* str)
 
     while (*str) {
         char c = *str;
-        // Allow alphanumeric, dots, underscores, hyphens
         if (!((c >= 'a' && c <= 'z') ||
               (c >= 'A' && c <= 'Z') ||
               (c >= '0' && c <= '9') ||
@@ -175,9 +174,8 @@ MojErr KeyServiceMojoHandler::handleGenerate(MojServiceMessage* msg, MojObject& 
     MojErrCheck(err);
 
     MojString keyname, owner, typeStr;
-    MojInt64 size = 256;
-
     bool found;
+
     err = payload.get(_T("keyname"), keyname, found);
     MojErrCheck(err);
     if (!found || keyname.empty()) {
@@ -187,7 +185,6 @@ MojErr KeyServiceMojoHandler::handleGenerate(MojServiceMessage* msg, MojObject& 
     err = payload.get(_T("owner"), owner, found);
     MojErrCheck(err);
     if (!found || owner.empty()) {
-        // Use sender as owner
         owner.assign(msg->senderId());
     }
 
@@ -198,24 +195,33 @@ MojErr KeyServiceMojoHandler::handleGenerate(MojServiceMessage* msg, MojObject& 
     err = payload.get(_T("type"), typeStr, found);
     MojErrCheck(err);
 
-    payload.get(_T("size"), size, found);
+    // Get size - MojInt64 get returns bool directly
+    MojInt64 size64 = 256;
+    payload.get(_T("size"), size64);
+    int size = (int)size64;
 
-    // Determine key type
-    LunaKeyMgmt::KeyType keyType = LunaKeyMgmt::KEY_AES;
+    // Determine algorithm and type
+    ushort algo = LunaKeyMgmt::KEY_ALG_AES;
+    ushort keyType = LunaKeyMgmt::KEY_TYPE_SECRET;
+
     if (found && typeStr.length() > 0) {
         if (typeStr == _T("RSA") || typeStr == _T("rsa")) {
-            keyType = LunaKeyMgmt::KEY_RSA_PAIR;
+            algo = LunaKeyMgmt::KEY_ALG_RSA;
+            keyType = LunaKeyMgmt::KEY_TYPE_PRIVATE;
         }
     }
 
     // Generate key
-    int result = m_keymanager->generateKey(keyname.data(), owner.data(), keyType, (int)size);
-    if (result != 0) {
+    LunaKeyMgmt::CKey* key = m_keymanager->generateKey(
+        owner.data(), keyname.data(), size, algo, keyType);
+
+    if (!key) {
         return replyError(msg, MojErrInternal, _T("Key generation failed"));
     }
 
     MojObject reply;
     reply.putString(_T("keyname"), keyname);
+    delete key;
     return replySuccess(msg, reply);
 }
 
@@ -225,7 +231,6 @@ MojErr KeyServiceMojoHandler::handleStore(MojServiceMessage* msg, MojObject& pay
     MojErrCheck(err);
 
     MojString keyname, owner, typeStr, dataStr;
-    MojInt64 size = 256;
     bool found;
 
     err = payload.get(_T("keyname"), keyname, found);
@@ -257,26 +262,24 @@ MojErr KeyServiceMojoHandler::handleStore(MojServiceMessage* msg, MojObject& pay
         return replyError(msg, MojErrInvalidArg, _T("Invalid base64 data"));
     }
 
-    // Determine key type
+    // Determine algorithm and type
     err = payload.get(_T("type"), typeStr, found);
-    LunaKeyMgmt::KeyType keyType = LunaKeyMgmt::KEY_AES;
+    ushort algo = LunaKeyMgmt::KEY_ALG_AES;
+    ushort keyType = LunaKeyMgmt::KEY_TYPE_SECRET;
+
     if (found && typeStr.length() > 0) {
         if (typeStr == _T("RSA") || typeStr == _T("rsa")) {
-            keyType = LunaKeyMgmt::KEY_RSA_PAIR;
+            algo = LunaKeyMgmt::KEY_ALG_RSA;
+            keyType = LunaKeyMgmt::KEY_TYPE_PRIVATE;
+        } else if (typeStr == _T("RSA_PUB") || typeStr == _T("rsa_pub")) {
+            algo = LunaKeyMgmt::KEY_ALG_RSA;
+            keyType = LunaKeyMgmt::KEY_TYPE_PUBLIC;
         }
     }
 
-    payload.get(_T("size"), size, found);
-
-    // Create and store key
-    LunaKeyMgmt::CKey key;
-    key.setKeyName(keyname.data());
-    key.setOwner(owner.data());
-    key.setType(keyType);
-    key.setSize((int)size);
-    key.setKeyData(keyData, keyLen);
-
-    int result = m_keymanager->storeKey(&key);
+    // Store key
+    int result = m_keymanager->storeKey(owner.data(), keyname.data(),
+                                         keyData, keyLen, algo, keyType);
     if (result != 0) {
         return replyError(msg, MojErrInternal, _T("Key storage failed"));
     }
@@ -308,32 +311,24 @@ MojErr KeyServiceMojoHandler::handleFetch(MojServiceMessage* msg, MojObject& pay
     }
 
     // Fetch key
-    LunaKeyMgmt::CKey key;
-    int result = m_keymanager->fetchKey(keyname.data(), owner.data(), &key);
-    if (result != 0) {
+    LunaKeyMgmt::CKey* key = m_keymanager->fetchKey(owner.data(), keyname.data());
+    if (!key) {
         return replyError(msg, MojErrNotFound, _T("Key not found"));
     }
 
     // Encode key data as base64
     MojString dataStr;
-    base64Encode(key.getKeyData(), key.getKeyDataLen(), dataStr);
+    base64Encode((unsigned char*)key->key_data, key->data_length, dataStr);
 
     // Build reply
     MojObject reply;
     reply.putString(_T("keyname"), keyname);
     reply.putString(_T("owner"), owner);
     reply.putString(_T("data"), dataStr);
+    reply.putString(_T("type"), key->keyTypeName());
+    reply.putInt(_T("size"), key->key_size);
 
-    const char* typeStr = "AES";
-    switch (key.getType()) {
-        case LunaKeyMgmt::KEY_RSA_PUB: typeStr = "RSA_PUB"; break;
-        case LunaKeyMgmt::KEY_RSA_PRIV: typeStr = "RSA_PRIV"; break;
-        case LunaKeyMgmt::KEY_RSA_PAIR: typeStr = "RSA_PAIR"; break;
-        default: break;
-    }
-    reply.putString(_T("type"), typeStr);
-    reply.putInt(_T("size"), key.getSize());
-
+    delete key;
     return replySuccess(msg, reply);
 }
 
@@ -361,7 +356,7 @@ MojErr KeyServiceMojoHandler::handleRemove(MojServiceMessage* msg, MojObject& pa
         return replyError(msg, MojErrInvalidArg, _T("Invalid characters in keyname or owner"));
     }
 
-    int result = m_keymanager->removeKey(keyname.data(), owner.data());
+    int result = m_keymanager->removeKey(owner.data(), keyname.data());
     if (result != 0) {
         return replyError(msg, MojErrNotFound, _T("Key not found"));
     }
@@ -386,27 +381,20 @@ MojErr KeyServiceMojoHandler::handleKeyInfo(MojServiceMessage* msg, MojObject& p
         owner.assign(msg->senderId());
     }
 
-    // Fetch key (without data)
-    LunaKeyMgmt::CKey key;
-    int result = m_keymanager->fetchKey(keyname.data(), owner.data(), &key);
-    if (result != 0) {
+    // Fetch key info
+    LunaKeyMgmt::CKey* key = m_keymanager->keyInfo(owner.data(), keyname.data());
+    if (!key) {
         return replyError(msg, MojErrNotFound, _T("Key not found"));
     }
 
     MojObject reply;
     reply.putString(_T("keyname"), keyname);
     reply.putString(_T("owner"), owner);
+    reply.putString(_T("type"), key->keyTypeName());
+    reply.putString(_T("algorithm"), key->algorithmName());
+    reply.putInt(_T("size"), key->key_size);
 
-    const char* typeStr = "AES";
-    switch (key.getType()) {
-        case LunaKeyMgmt::KEY_RSA_PUB: typeStr = "RSA_PUB"; break;
-        case LunaKeyMgmt::KEY_RSA_PRIV: typeStr = "RSA_PRIV"; break;
-        case LunaKeyMgmt::KEY_RSA_PAIR: typeStr = "RSA_PAIR"; break;
-        default: break;
-    }
-    reply.putString(_T("type"), typeStr);
-    reply.putInt(_T("size"), key.getSize());
-
+    delete key;
     return replySuccess(msg, reply);
 }
 
@@ -416,7 +404,7 @@ MojErr KeyServiceMojoHandler::handleKeyInfo(MojServiceMessage* msg, MojObject& p
 
 MojErr KeyServiceMojoHandler::handleCrypt(MojServiceMessage* msg, MojObject& payload)
 {
-    MojString keyname, owner, dataStr;
+    MojString keyname, owner, dataStr, modeStr, padStr;
     bool decrypt = false;
     bool found;
 
@@ -438,7 +426,26 @@ MojErr KeyServiceMojoHandler::handleCrypt(MojServiceMessage* msg, MojObject& pay
         return replyError(msg, MojErrInvalidArg, _T("data required"));
     }
 
-    payload.get(_T("decrypt"), decrypt, found);
+    payload.get(_T("decrypt"), decrypt);
+
+    // Get mode and padding
+    err = payload.get(_T("mode"), modeStr, found);
+    ushort mode = LunaKeyMgmt::MODE_CBC;
+    if (found && modeStr.length() > 0) {
+        mode = LunaKeyMgmt::CKeyManager::stringToMode(modeStr.data());
+    }
+
+    err = payload.get(_T("padding"), padStr, found);
+    ushort pad = LunaKeyMgmt::PAD_PKCS7;
+    if (found && padStr.length() > 0) {
+        pad = LunaKeyMgmt::CKeyManager::stringToPad(padStr.data());
+    }
+
+    // Get key ID
+    int keyId = m_keymanager->fetchKeyId(owner.data(), keyname.data());
+    if (keyId < 0) {
+        return replyError(msg, MojErrNotFound, _T("Key not found"));
+    }
 
     // Decode input data
     unsigned char inData[65536];
@@ -451,14 +458,9 @@ MojErr KeyServiceMojoHandler::handleCrypt(MojServiceMessage* msg, MojObject& pay
     unsigned char outData[65536 + 32];
     int outLen = sizeof(outData);
 
-    int result;
-    if (decrypt) {
-        result = m_keymanager->decrypt(keyname.data(), owner.data(),
-                                       inData, inLen, outData, &outLen);
-    } else {
-        result = m_keymanager->encrypt(keyname.data(), owner.data(),
-                                       inData, inLen, outData, &outLen);
-    }
+    ushort op = decrypt ? LunaKeyMgmt::CRYPT_DECRYPT : LunaKeyMgmt::CRYPT_ENCRYPT;
+    int result = m_keymanager->crypt((ushort)keyId, mode, pad, op,
+                                     NULL, 0, inData, inLen, outData, &outLen);
 
     if (result != 0) {
         return replyError(msg, MojErrInternal, decrypt ? _T("Decryption failed") : _T("Encryption failed"));
@@ -505,8 +507,18 @@ MojErr KeyServiceMojoHandler::handleFileEncrypt(MojServiceMessage* msg, MojObjec
         return replyError(msg, MojErrInvalidArg, _T("outfile required"));
     }
 
-    // TODO: Implement file encryption via CFileCrypt
-    return replyError(msg, MojErrNotImplemented, _T("File encryption not implemented"));
+    // Get key ID
+    int keyId = m_keymanager->fetchKeyId(owner.data(), keyname.data());
+    if (keyId < 0) {
+        return replyError(msg, MojErrNotFound, _T("Key not found"));
+    }
+
+    int result = m_keymanager->fileEncrypt((ushort)keyId, inPath.data(), outPath.data());
+    if (result != 0) {
+        return replyError(msg, MojErrInternal, _T("File encryption failed"));
+    }
+
+    return replySuccess(msg);
 }
 
 MojErr KeyServiceMojoHandler::handleFileDecrypt(MojServiceMessage* msg, MojObject& payload)
@@ -514,7 +526,7 @@ MojErr KeyServiceMojoHandler::handleFileDecrypt(MojServiceMessage* msg, MojObjec
     MojErr err = rejectIfInBackup(msg);
     MojErrCheck(err);
 
-    MojString inPath, outPath;
+    MojString inPath, outPath, password;
     bool found;
 
     err = payload.get(_T("infile"), inPath, found);
@@ -529,8 +541,15 @@ MojErr KeyServiceMojoHandler::handleFileDecrypt(MojServiceMessage* msg, MojObjec
         return replyError(msg, MojErrInvalidArg, _T("outfile required"));
     }
 
-    // TODO: Implement file decryption via CFileCrypt
-    return replyError(msg, MojErrNotImplemented, _T("File decryption not implemented"));
+    err = payload.get(_T("password"), password, found);
+    const char* pass = found ? password.data() : NULL;
+
+    int result = m_keymanager->fileDecrypt(inPath.data(), outPath.data(), pass);
+    if (result != 0) {
+        return replyError(msg, MojErrInternal, _T("File decryption failed"));
+    }
+
+    return replySuccess(msg);
 }
 
 //-----------------------------------------------------------------------------
@@ -539,7 +558,7 @@ MojErr KeyServiceMojoHandler::handleFileDecrypt(MojServiceMessage* msg, MojObjec
 
 MojErr KeyServiceMojoHandler::handleExport(MojServiceMessage* msg, MojObject& payload)
 {
-    MojString keyname, owner, password;
+    MojString keyname, owner, wrapKeyname;
     bool found;
 
     MojErr err = payload.get(_T("keyname"), keyname, found);
@@ -554,26 +573,30 @@ MojErr KeyServiceMojoHandler::handleExport(MojServiceMessage* msg, MojObject& pa
         owner.assign(msg->senderId());
     }
 
-    err = payload.get(_T("password"), password, found);
+    err = payload.get(_T("wrapKey"), wrapKeyname, found);
     MojErrCheck(err);
-    if (!found || password.empty()) {
-        return replyError(msg, MojErrInvalidArg, _T("password required"));
+    if (!found || wrapKeyname.empty()) {
+        return replyError(msg, MojErrInvalidArg, _T("wrapKey required"));
     }
 
-    unsigned char exportData[8192];
-    int exportLen = sizeof(exportData);
+    int keyId = m_keymanager->fetchKeyId(owner.data(), keyname.data());
+    if (keyId < 0) {
+        return replyError(msg, MojErrNotFound, _T("Key not found"));
+    }
 
-    int result = m_keymanager->exportKey(keyname.data(), owner.data(),
-                                         password.data(), exportData, &exportLen);
-    if (result != 0) {
+    int wrapKeyId = m_keymanager->fetchKeyId(owner.data(), wrapKeyname.data());
+    if (wrapKeyId < 0) {
+        return replyError(msg, MojErrNotFound, _T("Wrap key not found"));
+    }
+
+    char* wrapped = m_keymanager->exportWrappedKey((ushort)keyId, (ushort)wrapKeyId);
+    if (!wrapped) {
         return replyError(msg, MojErrInternal, _T("Key export failed"));
     }
 
-    MojString dataStr;
-    base64Encode(exportData, exportLen, dataStr);
-
     MojObject reply;
-    reply.putString(_T("data"), dataStr);
+    reply.putString(_T("data"), wrapped);
+    free(wrapped);
     return replySuccess(msg, reply);
 }
 
@@ -582,26 +605,8 @@ MojErr KeyServiceMojoHandler::handleImport(MojServiceMessage* msg, MojObject& pa
     MojErr err = rejectIfInBackup(msg);
     MojErrCheck(err);
 
-    MojString keyname, owner, password, dataStr;
+    MojString dataStr;
     bool found;
-
-    err = payload.get(_T("keyname"), keyname, found);
-    MojErrCheck(err);
-    if (!found || keyname.empty()) {
-        return replyError(msg, MojErrInvalidArg, _T("keyname required"));
-    }
-
-    err = payload.get(_T("owner"), owner, found);
-    MojErrCheck(err);
-    if (!found || owner.empty()) {
-        owner.assign(msg->senderId());
-    }
-
-    err = payload.get(_T("password"), password, found);
-    MojErrCheck(err);
-    if (!found || password.empty()) {
-        return replyError(msg, MojErrInvalidArg, _T("password required"));
-    }
 
     err = payload.get(_T("data"), dataStr, found);
     MojErrCheck(err);
@@ -609,20 +614,13 @@ MojErr KeyServiceMojoHandler::handleImport(MojServiceMessage* msg, MojObject& pa
         return replyError(msg, MojErrInvalidArg, _T("data required"));
     }
 
-    unsigned char importData[8192];
-    int importLen = base64Decode(dataStr.data(), importData, sizeof(importData));
-    if (importLen <= 0) {
-        return replyError(msg, MojErrInvalidArg, _T("Invalid base64 data"));
-    }
-
-    int result = m_keymanager->importKey(keyname.data(), owner.data(),
-                                         password.data(), importData, importLen);
-    if (result != 0) {
+    int result = m_keymanager->importWrappedKey(dataStr.data());
+    if (result < 0) {
         return replyError(msg, MojErrInternal, _T("Key import failed"));
     }
 
     MojObject reply;
-    reply.putString(_T("keyname"), keyname);
+    reply.putInt(_T("keyId"), result);
     return replySuccess(msg, reply);
 }
 
@@ -642,8 +640,9 @@ MojErr KeyServiceMojoHandler::handleHash(MojServiceMessage* msg, MojObject& payl
     }
 
     err = payload.get(_T("algorithm"), algorithm, found);
-    if (!found || algorithm.empty()) {
-        algorithm.assign(_T("sha256"));
+    ushort algo = LunaKeyMgmt::KEY_ALG_SHA1;
+    if (found && algorithm.length() > 0) {
+        algo = LunaKeyMgmt::CKeyManager::stringToAlgorithm(algorithm.data());
     }
 
     // Decode input
@@ -654,11 +653,10 @@ MojErr KeyServiceMojoHandler::handleHash(MojServiceMessage* msg, MojObject& payl
     }
 
     // Compute hash
-    LunaKeyMgmt::CCrypto crypto;
     unsigned char hash[64];
     int hashLen = sizeof(hash);
 
-    int result = crypto.hash(algorithm.data(), inData, inLen, hash, &hashLen);
+    int result = LunaKeyMgmt::CKeyManager::hash(algo, inData, inLen, hash, &hashLen);
     if (result != 0) {
         return replyError(msg, MojErrInvalidArg, _T("Hash computation failed"));
     }
@@ -673,7 +671,7 @@ MojErr KeyServiceMojoHandler::handleHash(MojServiceMessage* msg, MojObject& payl
 
 MojErr KeyServiceMojoHandler::handleHmac(MojServiceMessage* msg, MojObject& payload)
 {
-    MojString algorithm, keyStr, dataStr;
+    MojString keyname, owner, dataStr;
     bool found;
 
     MojErr err = payload.get(_T("data"), dataStr, found);
@@ -682,36 +680,36 @@ MojErr KeyServiceMojoHandler::handleHmac(MojServiceMessage* msg, MojObject& payl
         return replyError(msg, MojErrInvalidArg, _T("data required"));
     }
 
-    err = payload.get(_T("key"), keyStr, found);
+    err = payload.get(_T("keyname"), keyname, found);
     MojErrCheck(err);
-    if (!found || keyStr.empty()) {
-        return replyError(msg, MojErrInvalidArg, _T("key required"));
+    if (!found || keyname.empty()) {
+        return replyError(msg, MojErrInvalidArg, _T("keyname required"));
     }
 
-    err = payload.get(_T("algorithm"), algorithm, found);
-    if (!found || algorithm.empty()) {
-        algorithm.assign(_T("sha256"));
+    err = payload.get(_T("owner"), owner, found);
+    MojErrCheck(err);
+    if (!found || owner.empty()) {
+        owner.assign(msg->senderId());
     }
 
-    // Decode inputs
+    // Get key ID
+    int keyId = m_keymanager->fetchKeyId(owner.data(), keyname.data());
+    if (keyId < 0) {
+        return replyError(msg, MojErrNotFound, _T("Key not found"));
+    }
+
+    // Decode input
     unsigned char inData[65536];
     int inLen = base64Decode(dataStr.data(), inData, sizeof(inData));
     if (inLen <= 0) {
         return replyError(msg, MojErrInvalidArg, _T("Invalid base64 data"));
     }
 
-    unsigned char keyData[256];
-    int keyLen = base64Decode(keyStr.data(), keyData, sizeof(keyData));
-    if (keyLen <= 0) {
-        return replyError(msg, MojErrInvalidArg, _T("Invalid base64 key"));
-    }
-
     // Compute HMAC
-    LunaKeyMgmt::CCrypto crypto;
     unsigned char mac[64];
     int macLen = sizeof(mac);
 
-    int result = crypto.hmac(algorithm.data(), keyData, keyLen, inData, inLen, mac, &macLen);
+    int result = m_keymanager->hmac((ushort)keyId, inData, inLen, mac, &macLen);
     if (result != 0) {
         return replyError(msg, MojErrInvalidArg, _T("HMAC computation failed"));
     }
@@ -751,6 +749,12 @@ MojErr KeyServiceMojoHandler::handleRsaEncrypt(MojServiceMessage* msg, MojObject
         return replyError(msg, MojErrInvalidArg, _T("data required"));
     }
 
+    // Get key ID
+    int keyId = m_keymanager->fetchKeyId(owner.data(), keyname.data());
+    if (keyId < 0) {
+        return replyError(msg, MojErrNotFound, _T("Key not found"));
+    }
+
     // Decode input
     unsigned char inData[512];
     int inLen = base64Decode(dataStr.data(), inData, sizeof(inData));
@@ -758,20 +762,11 @@ MojErr KeyServiceMojoHandler::handleRsaEncrypt(MojServiceMessage* msg, MojObject
         return replyError(msg, MojErrInvalidArg, _T("Invalid base64 data"));
     }
 
-    // Get key
-    LunaKeyMgmt::CKey key;
-    int result = m_keymanager->fetchKey(keyname.data(), owner.data(), &key);
-    if (result != 0) {
-        return replyError(msg, MojErrNotFound, _T("Key not found"));
-    }
-
     // RSA encrypt
-    LunaKeyMgmt::CCrypto crypto;
     unsigned char outData[512];
     int outLen = sizeof(outData);
 
-    result = crypto.rsaPublicEncrypt(key.getKeyData(), key.getKeyDataLen(),
-                                     inData, inLen, outData, &outLen);
+    int result = m_keymanager->rsaEncrypt((ushort)keyId, inData, inLen, outData, &outLen);
     if (result != 0) {
         return replyError(msg, MojErrInternal, _T("RSA encryption failed"));
     }
@@ -807,6 +802,12 @@ MojErr KeyServiceMojoHandler::handleRsaDecrypt(MojServiceMessage* msg, MojObject
         return replyError(msg, MojErrInvalidArg, _T("data required"));
     }
 
+    // Get key ID
+    int keyId = m_keymanager->fetchKeyId(owner.data(), keyname.data());
+    if (keyId < 0) {
+        return replyError(msg, MojErrNotFound, _T("Key not found"));
+    }
+
     // Decode input
     unsigned char inData[512];
     int inLen = base64Decode(dataStr.data(), inData, sizeof(inData));
@@ -814,20 +815,11 @@ MojErr KeyServiceMojoHandler::handleRsaDecrypt(MojServiceMessage* msg, MojObject
         return replyError(msg, MojErrInvalidArg, _T("Invalid base64 data"));
     }
 
-    // Get key
-    LunaKeyMgmt::CKey key;
-    int result = m_keymanager->fetchKey(keyname.data(), owner.data(), &key);
-    if (result != 0) {
-        return replyError(msg, MojErrNotFound, _T("Key not found"));
-    }
-
     // RSA decrypt
-    LunaKeyMgmt::CCrypto crypto;
     unsigned char outData[512];
     int outLen = sizeof(outData);
 
-    result = crypto.rsaPrivateDecrypt(key.getKeyData(), key.getKeyDataLen(),
-                                      inData, inLen, outData, &outLen);
+    int result = m_keymanager->rsaDecrypt((ushort)keyId, inData, inLen, outData, &outLen);
     if (result != 0) {
         return replyError(msg, MojErrInternal, _T("RSA decryption failed"));
     }
@@ -848,17 +840,35 @@ MojErr KeyServiceMojoHandler::handlePreBackup(MojServiceMessage* msg, MojObject&
 {
     m_inBackup = true;
 
-    // TODO: Export keys to backup file
+    MojString password, salt, path;
+    bool found;
+
+    MojErr err = payload.get(_T("password"), password, found);
+    MojErrCheck(err);
+    if (!found || password.empty()) {
+        return replyError(msg, MojErrInvalidArg, _T("password required"));
+    }
+
+    err = payload.get(_T("salt"), salt, found);
+    const char* saltStr = found ? salt.data() : NULL;
+
+    err = payload.get(_T("path"), path, found);
+    const char* pathStr = found ? path.data() : "/tmp/keymanager-backup.db";
+
+    int result = m_keymanager->backup(pathStr, password.data(), saltStr);
+    if (result != 0) {
+        m_inBackup = false;
+        return replyError(msg, MojErrInternal, _T("Backup failed"));
+    }
+
     MojObject reply;
-    reply.putString(_T("tempDir"), _T("/tmp/keymanager-backup"));
+    reply.putString(_T("backupFile"), pathStr);
     return replySuccess(msg, reply);
 }
 
 MojErr KeyServiceMojoHandler::handlePostBackup(MojServiceMessage* msg, MojObject& payload)
 {
     m_inBackup = false;
-
-    // TODO: Cleanup backup temp files
     return replySuccess(msg);
 }
 
@@ -870,9 +880,29 @@ MojErr KeyServiceMojoHandler::handlePreRestore(MojServiceMessage* msg, MojObject
 
 MojErr KeyServiceMojoHandler::handlePostRestore(MojServiceMessage* msg, MojObject& payload)
 {
+    MojString password, salt, path;
+    bool found;
+
+    MojErr err = payload.get(_T("password"), password, found);
+    MojErrCheck(err);
+    if (!found || password.empty()) {
+        m_inRestore = false;
+        return replyError(msg, MojErrInvalidArg, _T("password required"));
+    }
+
+    err = payload.get(_T("salt"), salt, found);
+    const char* saltStr = found ? salt.data() : NULL;
+
+    err = payload.get(_T("path"), path, found);
+    const char* pathStr = found ? path.data() : "/tmp/keymanager-backup.db";
+
+    int result = m_keymanager->restore(pathStr, password.data(), saltStr);
     m_inRestore = false;
 
-    // TODO: Import keys from backup
+    if (result != 0) {
+        return replyError(msg, MojErrInternal, _T("Restore failed"));
+    }
+
     return replySuccess(msg);
 }
 
@@ -895,17 +925,15 @@ MojErr KeyServiceMojoApp::init()
 {
     MojErr err;
 
-    MojLogInfo(s_log, _T("KeyServiceMojoApp::init()"));
-
     // Initialize reactor
     err = m_reactor.init();
     MojErrCheck(err);
 
     // Initialize keymanager
     m_keymanager = new LunaKeyMgmt::CKeyManager();
-    int result = m_keymanager->init(NULL, NULL);  // Use default db path
+    int result = m_keymanager->initialize(NULL, NULL, NULL);
     if (result != 0) {
-        MojLogError(s_log, _T("CKeyManager::init failed: %d"), result);
+        fprintf(stderr, "CKeyManager::initialize failed: %d\n", result);
         return MojErrInternal;
     }
 
@@ -927,7 +955,7 @@ MojErr KeyServiceMojoApp::init()
     MojErrCheck(err);
 
     m_initialized = true;
-    MojLogInfo(s_log, _T("KeyServiceMojoApp initialized successfully"));
+    fprintf(stderr, "KeyServiceMojoApp initialized successfully\n");
 
     return MojErrNone;
 }
@@ -939,19 +967,19 @@ MojErr KeyServiceMojoApp::run()
         MojErrCheck(err);
     }
 
-    MojLogInfo(s_log, _T("KeyServiceMojoApp::run() - entering main loop"));
+    fprintf(stderr, "KeyServiceMojoApp::run() - entering main loop\n");
     return m_reactor.run();
 }
 
 MojErr KeyServiceMojoApp::shutdown()
 {
-    MojLogInfo(s_log, _T("KeyServiceMojoApp::shutdown()"));
+    fprintf(stderr, "KeyServiceMojoApp::shutdown()\n");
 
     m_reactor.stop();
     m_service.close();
 
     if (m_keymanager) {
-        m_keymanager->shutdown();
+        m_keymanager->finish();
         delete m_keymanager;
         m_keymanager = NULL;
     }
@@ -966,11 +994,14 @@ MojErr KeyServiceMojoApp::shutdown()
 
 int main(int argc, char** argv)
 {
+    (void)argc;
+    (void)argv;
+
     KeyServiceMojoApp app;
 
     MojErr err = app.run();
     if (err != MojErrNone) {
-        MojLogError(s_log, _T("Application failed with error: %d"), err);
+        fprintf(stderr, "Application failed with error: %d\n", err);
         return 1;
     }
 

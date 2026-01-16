@@ -128,31 +128,27 @@ keyservice_handler.o: keyservice_handler.cpp keyservice_handler.h keymanager_typ
 service: keymanager
 
 #=============================================================================
-# Mojo Framework Build (EXPERIMENTAL - requires compatible SDK headers)
+# Mojo Framework Build
 #=============================================================================
 #
-# NOTE: The Mojo/DB8 headers from OpenWebOS GitHub are incompatible with
-# the webOS 3.0.5 build environment. The headers expect newer toolchain
-# features and type definitions not available in our CodeSourcery 2009q1
-# build system.
+# Uses openwebos/db8 headers with compatibility shims for webOS 3.0.5.
+# The mojo_compat_stubs.cpp provides implementations for functions declared
+# in headers but not present in webOS 3.0.5 libmojocore.so.
 #
-# The keyservice_mojo.cpp implementation is provided as reference for
-# future work. To build it, you would need the original Palm/HP SDK
-# headers that match the webOS 3.0.5 system libraries.
-#
-# The recommended build target is 'service' which uses direct Luna Service
-# API (keyservice_handler.cpp) and provides the same functionality.
+# Both 'service' (Luna Service API) and 'service-mojo' (Mojo framework)
+# targets provide equivalent functionality.
 #
 #=============================================================================
 
-# Mojo/DB8 headers location (from github.com/webosose/db8 - more compatible)
-MOJO_DIR = $(DEPS_DIR)/db8-webosose/inc
+# Mojo/DB8 headers location (from github.com/openwebos/db8 - webOS 3.0.5 compatible)
+MOJO_DIR = $(DEPS_DIR)/db8/inc
 # Compatibility shims for missing headers (luna-service2, PmLogLib)
 COMPAT_DIR = ./compat
 
 # Mojo compilation flags (compat dir first to pick up shims)
 # MOJ_LINUX enables proper Unix/Linux configuration
-MOJO_CFLAGS = -DMOJ_LINUX \
+# -march=armv7-a enables ldrex/strex atomic instructions used by Mojo
+MOJO_CFLAGS = -DMOJ_LINUX -march=armv7-a \
               -I$(COMPAT_DIR) \
               -I$(MOJO_DIR) \
               -I$(MOJO_DIR)/core \
@@ -162,11 +158,11 @@ MOJO_CFLAGS = -DMOJ_LINUX \
 # Mojo libraries (from rootfs)
 MOJO_LDFLAGS = -L$(ROOTFS_LIB) -lmojocore -lmojoluna -lmojodb
 
-# Mojo service source files
-MOJO_SERVICE_SRCS = keyservice_mojo.cpp
+# Mojo service source files (includes compatibility stubs for webOS 3.0.5)
+MOJO_SERVICE_SRCS = keyservice_mojo.cpp mojo_compat_stubs.cpp
 MOJO_SERVICE_OBJS = $(MOJO_SERVICE_SRCS:.cpp=.o)
 
-# Mojo service executable (EXPERIMENTAL - see note above)
+# Mojo service executable
 keymanager-mojo: $(MOJO_SERVICE_OBJS) $(FULL_OBJS)
 	$(CXX) $(CXXFLAGS) $(LUNA_CFLAGS) $(MOJO_CFLAGS) -o $@ $^ $(LDFLAGS_FULL) $(LUNA_LDFLAGS) $(MOJO_LDFLAGS)
 
@@ -174,8 +170,11 @@ keymanager-mojo: $(MOJO_SERVICE_OBJS) $(FULL_OBJS)
 keyservice_mojo.o: keyservice_mojo.cpp keyservice_mojo.h keymanager_types.h
 	$(CXX) $(CXXFLAGS) $(LUNA_CFLAGS) $(MOJO_CFLAGS) -c $< -o $@
 
-# Mojo service build target (EXPERIMENTAL)
+# Mojo compatibility stubs (for webOS 3.0.5 library compatibility)
+mojo_compat_stubs.o: mojo_compat_stubs.cpp
+	$(CXX) $(CXXFLAGS) $(LUNA_CFLAGS) $(MOJO_CFLAGS) -c $< -o $@
+
+# Mojo service build target
 service-mojo: keymanager-mojo
-	@echo "WARNING: Mojo build requires compatible SDK headers"
 
 .PHONY: all full clean test test-full service service-mojo
