@@ -1,0 +1,25 @@
+# Build artifacts
+*.o
+*.a
+
+# Binaries
+keymanager
+test_kdf
+test_crypto
+test_keymanager
+
+# Test files
+/tmp/test_*.db
+/tmp/test_*.txt
+/tmp/test_*.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
