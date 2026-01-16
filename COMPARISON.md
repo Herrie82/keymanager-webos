@@ -87,9 +87,9 @@ Comparison between the original HP TouchPad webOS 3.0.5 keymanager binary and th
 
 | Aspect | Original | Rebuilt |
 |--------|----------|---------|
-| libcurl | Required, always linked | Optional |
-| Build flag | N/A | `-DHAVE_CURL` to enable |
-| Default | Enabled | Disabled |
+| libcurl | Required, always linked | Required, always linked |
+| Version | libcurl.so.4.2.0 | libcurl.so.4.8.0 (updated) |
+| Default | Enabled | Enabled |
 
 ### 4. Code Size
 
