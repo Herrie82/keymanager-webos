@@ -352,7 +352,7 @@ int CCrypto::cipherFinal(void* out, int* out_len) {
         } else {
             result = EVP_DecryptFinal_ex(cipher_ctx, (uchar*)out, out_len);
         }
-        EVP_CIPHER_CTX_cleanup(cipher_ctx);
+        EVP_CIPHER_CTX_reset(cipher_ctx);
         return result;
     } else if (isHash() && md_ctx) {
         uint len;

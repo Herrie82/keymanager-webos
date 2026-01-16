@@ -463,16 +463,14 @@ void CKeyStore::encryptKey(CKey* key, uchar* wrap_key, int wrap_key_len, uchar* 
         memset(out, 0, out_size);
 
         EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-        EVP_CIPHER_CTX_init(ctx);
-        EVP_EncryptInit(ctx, cipher, wrap_key, iv);
+        EVP_EncryptInit_ex(ctx, cipher, NULL, wrap_key, iv);
 
         int out_len = out_size;
         EVP_EncryptUpdate(ctx, out, &out_len, (uchar*)key->key_data, data_len);
 
         int final_len = out_size - out_len;
-        EVP_EncryptFinal(ctx, out + out_len, &final_len);
+        EVP_EncryptFinal_ex(ctx, out + out_len, &final_len);
 
-        EVP_CIPHER_CTX_cleanup(ctx);
         EVP_CIPHER_CTX_free(ctx);
 
         // Securely clear original data
@@ -505,16 +503,14 @@ void CKeyStore::decryptKey(CKey* key, uchar* wrap_key, int wrap_key_len, uchar* 
         memset(out, 0, data_len);
 
         EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-        EVP_CIPHER_CTX_init(ctx);
-        EVP_DecryptInit(ctx, cipher, wrap_key, iv);
+        EVP_DecryptInit_ex(ctx, cipher, NULL, wrap_key, iv);
 
         int out_len = data_len;
         EVP_DecryptUpdate(ctx, out, &out_len, (uchar*)key->key_data, data_len);
 
         int final_len = data_len - out_len;
-        EVP_DecryptFinal(ctx, out + out_len, &final_len);
+        EVP_DecryptFinal_ex(ctx, out + out_len, &final_len);
 
-        EVP_CIPHER_CTX_cleanup(ctx);
         EVP_CIPHER_CTX_free(ctx);
 
         // Replace encrypted data with decrypted
