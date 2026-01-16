@@ -4,6 +4,7 @@
 
 # Binaries
 keymanager
+keymanager-mojo
 test_kdf
 test_crypto
 test_keymanager
