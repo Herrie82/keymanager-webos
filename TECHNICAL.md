@@ -619,3 +619,51 @@ CXXFLAGS = -Wall -Wextra -g -O2
 | libglib-2.0 | GLib utilities |
 | libgthread-2.0 | GLib threading |
 | libcurl | HTTP client (optional) |
+
+---
+
+## Mojo Framework Integration (Experimental)
+
+### Background
+
+The original webOS 3.0.5 keymanager binary links against the Mojo framework libraries:
+- `libmojocore.so` - Core Mojo utilities
+- `libmojoluna.so` - Mojo Luna Service integration
+- `libmojodb.so` - Mojo database abstraction
+
+However, the original keymanager uses **SQLite directly** for key storage (at `/var/palm/data/keys.db`), not the DB8/MojoDB document store. The Mojo libraries are used only for the service layer (MojLunaService, MojGmainReactor).
+
+### Implementation Status
+
+Source files have been created for Mojo framework integration:
+- `keyservice_mojo.h` - Header with KeyServiceMojoHandler and KeyServiceMojoApp classes
+- `keyservice_mojo.cpp` - Full implementation using MojLunaService and MojObject
+- `compat/` - Compatibility shim headers for missing dependencies
+
+### Build Issues
+
+The Mojo/DB8 headers from OpenWebOS (github.com/openwebos/db8) are **incompatible** with the webOS 3.0.5 build environment:
+
+1. **Type Definitions**: Headers expect `MojInt64`, `MojSize`, etc. to be defined by newer toolchain
+2. **System Headers**: Missing `luna-service2/lunaservice.h` path structure
+3. **Logging**: Expects `PmLogLib.h` in different location
+4. **C++ Features**: Some constructs incompatible with GCC 4.3.3 (CodeSourcery 2009q1)
+
+### Recommended Approach
+
+Use the Luna Service implementation (`make service`) which provides identical functionality without Mojo dependencies:
+
+```bash
+# Recommended: Luna Service version
+make service
+
+# Experimental: Mojo version (requires compatible SDK headers)
+make service-mojo
+```
+
+The Luna Service version (`keyservice_handler.cpp`) uses:
+- Direct Luna Service API (`LSRegister`, `LSGmainAttach`, etc.)
+- MJson library for JSON parsing
+- GLib main loop for event handling
+
+This is functionally equivalent to the Mojo version and is fully compatible with webOS.

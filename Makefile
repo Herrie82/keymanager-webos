@@ -99,8 +99,8 @@ test-full: full
 	./test_keymanager
 
 clean:
-	rm -f $(FULL_OBJS) $(TEST_KDF_SRCS:.cpp=.o) $(TEST_CRYPTO_SRCS:.cpp=.o) $(TEST_FULL_SRCS:.cpp=.o) $(SERVICE_OBJS)
-	rm -f test_kdf test_crypto test_keymanager keymanager
+	rm -f $(FULL_OBJS) $(TEST_KDF_SRCS:.cpp=.o) $(TEST_CRYPTO_SRCS:.cpp=.o) $(TEST_FULL_SRCS:.cpp=.o) $(SERVICE_OBJS) $(MOJO_SERVICE_OBJS)
+	rm -f test_kdf test_crypto test_keymanager keymanager keymanager-mojo
 	rm -f /tmp/test_keymanager.db /tmp/test_*.txt /tmp/test_*.bin
 	rm -f libkeymanager-core.a libkeymanager.a
 
@@ -127,4 +127,53 @@ keyservice_handler.o: keyservice_handler.cpp keyservice_handler.h keymanager_typ
 # Service build target (complete keymanager with Luna service)
 service: keymanager
 
-.PHONY: all full clean test test-full service
+#=============================================================================
+# Mojo Framework Build (EXPERIMENTAL - requires compatible SDK headers)
+#=============================================================================
+#
+# NOTE: The Mojo/DB8 headers from OpenWebOS GitHub are incompatible with
+# the webOS 3.0.5 build environment. The headers expect newer toolchain
+# features and type definitions not available in our CodeSourcery 2009q1
+# build system.
+#
+# The keyservice_mojo.cpp implementation is provided as reference for
+# future work. To build it, you would need the original Palm/HP SDK
+# headers that match the webOS 3.0.5 system libraries.
+#
+# The recommended build target is 'service' which uses direct Luna Service
+# API (keyservice_handler.cpp) and provides the same functionality.
+#
+#=============================================================================
+
+# Mojo/DB8 headers location (from github.com/openwebos/db8)
+MOJO_DIR = $(DEPS_DIR)/db8/inc
+# Compatibility shims for missing headers (luna-service2, PmLogLib)
+COMPAT_DIR = ./compat
+
+# Mojo compilation flags (compat dir first to pick up shims)
+MOJO_CFLAGS = -I$(COMPAT_DIR) \
+              -I$(MOJO_DIR) \
+              -I$(MOJO_DIR)/core \
+              -I$(MOJO_DIR)/db \
+              -I$(MOJO_DIR)/luna
+
+# Mojo libraries (from rootfs)
+MOJO_LDFLAGS = -L$(ROOTFS_LIB) -lmojocore -lmojoluna -lmojodb
+
+# Mojo service source files
+MOJO_SERVICE_SRCS = keyservice_mojo.cpp
+MOJO_SERVICE_OBJS = $(MOJO_SERVICE_SRCS:.cpp=.o)
+
+# Mojo service executable (EXPERIMENTAL - see note above)
+keymanager-mojo: $(MOJO_SERVICE_OBJS) $(FULL_OBJS)
+	$(CXX) $(CXXFLAGS) $(LUNA_CFLAGS) $(MOJO_CFLAGS) -o $@ $^ $(LDFLAGS_FULL) $(LUNA_LDFLAGS) $(MOJO_LDFLAGS)
+
+# Mojo service object files need Mojo headers
+keyservice_mojo.o: keyservice_mojo.cpp keyservice_mojo.h keymanager_types.h
+	$(CXX) $(CXXFLAGS) $(LUNA_CFLAGS) $(MOJO_CFLAGS) -c $< -o $@
+
+# Mojo service build target (EXPERIMENTAL)
+service-mojo: keymanager-mojo
+	@echo "WARNING: Mojo build requires compatible SDK headers"
+
+.PHONY: all full clean test test-full service service-mojo
