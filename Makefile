@@ -145,13 +145,15 @@ service: keymanager
 #
 #=============================================================================
 
-# Mojo/DB8 headers location (from github.com/openwebos/db8)
-MOJO_DIR = $(DEPS_DIR)/db8/inc
+# Mojo/DB8 headers location (from github.com/webosose/db8 - more compatible)
+MOJO_DIR = $(DEPS_DIR)/db8-webosose/inc
 # Compatibility shims for missing headers (luna-service2, PmLogLib)
 COMPAT_DIR = ./compat
 
 # Mojo compilation flags (compat dir first to pick up shims)
-MOJO_CFLAGS = -I$(COMPAT_DIR) \
+# MOJ_LINUX enables proper Unix/Linux configuration
+MOJO_CFLAGS = -DMOJ_LINUX \
+              -I$(COMPAT_DIR) \
               -I$(MOJO_DIR) \
               -I$(MOJO_DIR)/core \
               -I$(MOJO_DIR)/db \
