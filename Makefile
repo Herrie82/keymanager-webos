@@ -17,7 +17,11 @@ ROOTFS_LIB = /home/herrie/webos/touchpad-kernel/doctor305/untouched-rootfs/usr/l
 CXX = $(CROSS_COMPILE)g++
 CC = $(CROSS_COMPILE)gcc
 AR = $(CROSS_COMPILE)ar
-CXXFLAGS = -Wall -Wextra -g -O2 -I$(OPENSSL_DIR)/include -I$(ISIS_STAGING)/usr/include
+# HAVE_CURL enables cloud key escrow support (CCloudKey)
+CURL_DIR = $(DEPS_DIR)/woce-build-support/staging/arm-none-linux-gnueabi
+# Updated curl library built with OpenSSL 1.1.1w
+CURL_LIB = /home/herrie/webos/touchpad-kernel/doctor305/OpenSSL-11-Update/package/usr/lib
+CXXFLAGS = -Wall -Wextra -g -O2 -DHAVE_CURL -I$(OPENSSL_DIR)/include -I$(ISIS_STAGING)/usr/include -I$(CURL_DIR)/include
 LDFLAGS_CORE = -L$(OPENSSL_DIR) -lssl -lcrypto
 LDFLAGS_FULL = -L$(OPENSSL_DIR) -lssl -lcrypto -L$(ISIS_STAGING)/usr/lib -lsqlite3
 
@@ -35,6 +39,7 @@ LUNA_LDFLAGS = --sysroot=$(SYSROOT) \
                -L$(SYSROOT)/lib -L$(SYSROOT)/usr/lib \
                -L$(ISIS_STAGING)/usr/lib -lglib-2.0 -lgthread-2.0 \
                -L$(ROOTFS_LIB) -llunaservice -lcjson -lmjson \
+               -L$(CURL_LIB) -lcurl \
                -Wl,-rpath-link,$(ROOTFS_BASE)/lib \
                -Wl,-rpath-link,$(ROOTFS_LIB) \
                -Wl,-rpath,/usr/lib
